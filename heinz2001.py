@@ -1,152 +1,19 @@
 import argparse
-import itertools
 import json
 import os
-import sys
 import time
 
 import numpy as np
 import pandas as pd
 import torch
-import torchaudio
 import torchmetrics
 
 import util_misc
-import util_tf2torch
 import util_torch
 
-
-class Dataset(torch.utils.data.Dataset):
-    def __init__(
-        self,
-        sr=40e3,
-        dur=0.200,
-        dur_ramp=0.020,
-        dur_padded=0.250,
-        f_min=2e2,
-        f_max=1e4,
-        f_list=None,
-        interval_min=1e-5,
-        interval_max=1e-0,
-        interval_list=None,
-        dbspl_min=37.0,
-        dbspl_max=43.0,
-        dbspl_fixed=False,
-        phase_fixed=0.0,
-        transform=None,
-    ):
-        """ """
-        self.transform = transform
-        self.sr = sr
-        self.dur = dur
-        self.dur_ramp = dur_ramp
-        self.dur_padded = dur_padded
-        self.f_min = torch.tensor(f_min)
-        self.f_max = torch.tensor(f_max)
-        self.dbspl_min = dbspl_min
-        self.dbspl_max = dbspl_max
-        self.dbspl_fixed = dbspl_fixed
-        self.phase_fixed = phase_fixed
-        self.phase = None
-        if isinstance(self.phase_fixed, float):
-            self.phase = torch.tensor(self.phase_fixed, dtype=torch.float32)
-        self.eval_mode = (f_list is not None) and (interval_list is not None)
-        if self.eval_mode:
-            tmp = np.array(list(itertools.product(f_list, interval_list)))
-            self.f_list = torch.tensor(tmp[:, 0])
-            self.interval_list = torch.tensor(tmp[:, 1])
-        else:
-            self.dist_log_f = torch.distributions.Uniform(
-                low=torch.log(self.f_min),
-                high=torch.log(self.f_max),
-            )
-            self.dist_log_interval = torch.distributions.Uniform(
-                low=torch.log(torch.tensor(interval_min)),
-                high=torch.log(torch.tensor(interval_max)),
-            )
-            self.dist_label = torch.distributions.bernoulli.Bernoulli(
-                probs=0.5,
-            )
-        self.dist_dbspl = torch.distributions.Uniform(
-            low=self.dbspl_min,
-            high=self.dbspl_max,
-        )
-        self.dist_phase = torch.distributions.Uniform(
-            low=0,
-            high=2 * np.pi,
-        )
-        self.t = torch.arange(0, self.dur + self.dur_ramp, 1 / sr)
-        self.ramp = torch.signal.windows.hann(int(2 * sr * self.dur_ramp))
-        self.ramp_rise_fall = torch.concat(
-            [
-                self.ramp[: int(sr * self.dur_ramp)],
-                torch.ones(int(np.round(sr * (self.dur - self.dur_ramp)))),
-                self.ramp[-int(sr * self.dur_ramp) :],
-            ]
-        )
-        if self.dur_padded is not None:
-            self.n_pad = int(sr * self.dur_padded) - self.t.shape[0]
-
-    def generate_stim(self, f0, f1, dbspl0, dbspl1, phase0, phase1):
-        """ """
-        assert (f0 < self.sr / 2) and (f1 < self.sr / 2)
-        x0 = torch.cos(2 * np.pi * f0 * self.t + phase0)
-        x1 = torch.cos(2 * np.pi * f1 * self.t + phase1)
-        x0 = x0 * self.ramp_rise_fall
-        x1 = x1 * self.ramp_rise_fall
-        x0 = util_torch.set_dbspl(x0, dbspl0)
-        x1 = util_torch.set_dbspl(x1, dbspl1)
-        if self.dur_padded is not None:
-            x0 = torch.nn.functional.pad(x0, [0, self.n_pad])
-            x1 = torch.nn.functional.pad(x1, [0, self.n_pad])
-        return x0, x1
-
-    def __getitem__(self, idx):
-        """ """
-        if self.eval_mode:
-            interval = self.interval_list[idx]
-            label = (interval > 0).type(interval.dtype)
-            f0 = self.f_list[idx]
-        else:
-            interval = torch.exp(self.dist_log_interval.sample())
-            label = self.dist_label.sample()
-            if label == 0:
-                interval *= -1
-            f0 = torch.exp(self.dist_log_f.sample())
-        f1 = f0 * torch.pow(2, interval)
-        [dbspl0, dbspl1] = self.dist_dbspl.sample([2])
-        [phase0, phase1] = self.dist_phase.sample([2])
-        if self.dbspl_fixed:
-            dbspl1 = dbspl0
-        if self.phase_fixed:
-            phase1 = phase0
-        if self.phase is not None:
-            phase0 = self.phase
-            phase1 = self.phase
-        x0, x1 = self.generate_stim(f0, f1, dbspl0, dbspl1, phase0, phase1)
-        out = {
-            "sr": torch.tensor(self.sr),
-            "x0": x0,
-            "x1": x1,
-            "label": label,
-            "interval": interval,
-            "f0": f0,
-            "f1": f1,
-            "dbspl0": dbspl0,
-            "dbspl1": dbspl1,
-            "phase0": phase0,
-            "phase1": phase1,
-        }
-        if self.transform is not None:
-            out = self.transform(out)
-        return out
-
-    def __len__(self):
-        """ """
-        if self.eval_mode:
-            return len(self.f_list)
-        else:
-            return sys.maxsize - 1
+from pure_tone_dataset import Dataset
+from peripheral_model import PeripheralModel
+from perceptual_model import PerceptualModel
 
 
 class Model(torch.nn.Module):
@@ -160,8 +27,10 @@ class Model(torch.nn.Module):
         """ """
         super().__init__()
         self.input_shape = input_shape
-        self.peripheral_model = ANModel(**config_model["kwargs_anmodel"])
-        self.perceptual_model = util_tf2torch.PerceptualModelFromConfig(
+        self.peripheral_model = PeripheralModel(
+            **config_model["kwargs_anmodel"],
+        )
+        self.perceptual_model = PerceptualModel(
             architecture=architecture,
             input_shape=self.peripheral_model(torch.zeros(self.input_shape)).shape,
             heads=config_model["n_classes_dict"],
@@ -171,183 +40,6 @@ class Model(torch.nn.Module):
     def forward(self, x):
         """ """
         return self.perceptual_model(self.peripheral_model(x))
-
-
-class ANModel(torch.nn.Module):
-    def __init__(
-        self,
-        sr_input=40e3,
-        sr_output=20e3,
-        min_cf=1e2,
-        max_cf=1e4,
-        num_cf=60,
-        fir_dur=None,
-        scale_gammatone_filterbank=None,
-        ihc_lowpass_cutoff=4.8e3,
-        anf_per_channel=200,
-    ):
-        """ """
-        super().__init__()
-        self.sr_input = sr_input
-        self.sr_output = sr_output
-        if self.sr_output is None:
-            self.sr_output = self.sr_input
-        self.cfs = self.x2f(np.linspace(self.f2x(min_cf), self.f2x(max_cf), num_cf))
-        self.gammatone_filterbank = util_torch.GammatoneFilterbank(
-            sr=self.sr_input,
-            fir_dur=fir_dur,
-            cfs=self.cfs,
-            dtype=torch.float32,
-        )
-        self.scale_gammatone_filterbank = scale_gammatone_filterbank
-        self.ihc_nonlinearity = IHCNonlinearity()
-        self.ihc_lowpassfilter = IHCLowpassFilter(
-            sr_input=self.sr_input,
-            sr_output=self.sr_output,
-            cutoff=ihc_lowpass_cutoff,
-        )
-        self.neural_adaptation = NeuralAdaptation(sr=self.sr_output)
-        self.anf_per_channel = anf_per_channel
-
-    def f2x(self, f):
-        """ """
-        msg = "frequency out of human range"
-        assert np.all(np.logical_and(f >= 20, f <= 20677)), msg
-        x = (1.0 / 0.06) * np.log10((f / 165.4) + 0.88)
-        return x
-
-    def x2f(self, x):
-        """ """
-        msg = "BM distance out of human range"
-        assert np.all(np.logical_and(x >= 0, x <= 35)), msg
-        f = 165.4 * (np.power(10.0, (0.06 * x)) - 0.88)
-        return f
-
-    def spike_generator(self, rate):
-        """ """
-        if self.anf_per_channel is None:
-            return rate
-        p = rate / self.sr_output
-        spikes = (
-            torch.rand(
-                size=(self.anf_per_channel, *p.shape),
-                device=rate.device,
-            )
-            < p[None, :]
-        )
-        return spikes.sum(dim=0).to(rate.dtype)
-
-    def forward(self, x):
-        """ """
-        if x.shape[-1] == 2:
-            x = torch.swapaxes(x, -1, -2)
-        x = self.gammatone_filterbank(x)
-        if self.scale_gammatone_filterbank is not None:
-            x = self.scale_gammatone_filterbank * x
-        x = self.ihc_nonlinearity(x)
-        x = self.ihc_lowpassfilter(x)
-        x = self.neural_adaptation(x)
-        x = self.spike_generator(x)
-        return x
-
-
-class IHCNonlinearity(torch.nn.Module):
-    def __init__(
-        self,
-        ihc_asym=3,
-        ihc_k=1225.0,
-    ):
-        """ """
-        super().__init__()
-        self.ihc_beta = torch.tensor(
-            np.tan(np.pi * (-0.5 + 1 / (ihc_asym + 1))),
-            dtype=torch.float32,
-        )
-        self.ihc_k = torch.tensor(ihc_k, dtype=torch.float32)
-
-    def forward(self, x):
-        """ """
-        x = torch.atan(self.ihc_k * x + self.ihc_beta) - torch.atan(self.ihc_beta)
-        x = x / (np.pi / 2 - torch.atan(self.ihc_beta))
-        return x
-
-
-class IHCLowpassFilter(torch.nn.Module):
-    def __init__(
-        self,
-        sr_input=40e3,
-        sr_output=20e3,
-        cutoff=4.8e3,
-        n=7,
-    ):
-        """ """
-        super().__init__()
-        self.sr_input = sr_input
-        self.sr_output = sr_output
-        self.n = n
-        c = 2 * self.sr_input
-        c1LPihc = (c - 2 * np.pi * cutoff) / (c + 2 * np.pi * cutoff)
-        c2LPihc = 2 * np.pi * cutoff / (2 * np.pi * cutoff + c)
-        b = torch.tensor([c2LPihc, c2LPihc], dtype=torch.float32)
-        a = torch.tensor([1.0, -c1LPihc], dtype=torch.float32)
-        self.register_buffer("b", b)
-        self.register_buffer("a", a)
-        self.stride = int(sr_input / sr_output)
-        msg = f"{sr_input=} and {sr_output=} require non-integer stride"
-        assert np.isclose(self.stride, sr_input / sr_output), msg
-
-    def forward(self, x):
-        """ """
-        for _ in range(self.n):
-            x = torchaudio.functional.lfilter(
-                waveform=x,
-                a_coeffs=self.a,
-                b_coeffs=self.b,
-            )
-        if not self.sr_output == self.sr_input:
-            x = x[..., :: self.stride]
-        return x
-
-
-class NeuralAdaptation(torch.nn.Module):
-    def __init__(
-        self,
-        sr=20e3,
-        VI=5e-4,
-        VL=5e-3,
-        PG=3e-2,
-        PL=6e-2,
-        PIrest=1.2e-2,
-        PImax=6e-1,
-        spont=5e1,
-    ):
-        """ """
-        super().__init__()
-        self.sr = torch.tensor(sr, dtype=torch.float32)
-        self.VI = torch.tensor(VI, dtype=torch.float32)
-        self.VL = torch.tensor(VL, dtype=torch.float32)
-        self.PG = torch.tensor(PG, dtype=torch.float32)
-        self.PL = torch.tensor(PL, dtype=torch.float32)
-        self.PIrest = torch.tensor(PIrest, dtype=torch.float32)
-        self.PImax = torch.tensor(PImax, dtype=torch.float32)
-        self.spont = torch.tensor(spont, dtype=torch.float32)
-        self.ln2 = torch.log(torch.tensor(2.0))
-
-    def forward(self, ihcl):
-        """ """
-        SPER = 1 / self.sr
-        CI = torch.ones_like(ihcl[..., 0]) * self.spont / self.PIrest
-        CL = CI * (self.PIrest + self.PL) / self.PL
-        CG = CL * (1 + self.PL / self.PG) - CI * self.PL / self.PG
-        p1 = torch.log(torch.exp(self.ln2 * self.PImax / self.PIrest) - 1)
-        p3 = p1 * self.PIrest / self.ln2
-        PPI = p3 / p1 * torch.log(1 + torch.exp(p1 * ihcl))
-        ifr = torch.ones_like(ihcl) * self.spont
-        for k in range(1, ihcl.shape[-1]):
-            CI = CI + (SPER / self.VI) * (-PPI[..., k] * CI + self.PL * (CL - CI))
-            CL = CL + (SPER / self.VL) * (-self.PL * (CL - CI) + self.PG * (CG - CL))
-            ifr[..., k] = CI * PPI[..., k]
-        return ifr
 
 
 def evaluate(

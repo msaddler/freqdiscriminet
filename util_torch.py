@@ -5,7 +5,6 @@ import re
 import numpy as np
 import torch
 import torchaudio
-import torchvision
 
 
 def rms(x, dim=None, keepdim=False):
@@ -36,24 +35,116 @@ def set_dbspl(x, dbspl, mean_subtract=True, dim=None, keepdim=False):
     return x
 
 
-def pad_or_trim_to_len(x, n, dim=-1, kwargs_pad={}):
-    """
-    Symmetrically pad or trim `x` to length `n` along axis `dim`
-    """
-    n_orig = int(x.shape[dim])
-    if n_orig < n:
-        n0 = (n - n_orig) // 2
-        n1 = (n - n_orig) - n0
-        pad = []
-        for _ in range(x.ndim):
-            pad.extend([n0, n1] if _ == dim else [0, 0])
-        x = torch.nn.functional.pad(x, pad, **kwargs_pad)
-    if n_orig > n:
-        n0 = (n_orig - n) // 2
-        ind = [slice(None)] * x.ndim
-        ind[dim] = slice(n0, n0 + n)
-        x = x[ind]
-    return x
+def save_model_checkpoint(
+    model,
+    dir_model=None,
+    step=None,
+    fn_ckpt="ckpt_BEST.pt",
+    fn_ckpt_step="ckpt_{:04d}.pt",
+    **kwargs,
+):
+    """ """
+    filename = fn_ckpt
+    if step is not None:
+        filename = fn_ckpt_step.format(step)
+    if dir_model is not None:
+        filename = os.path.join(dir_model, filename)
+    torch.save(model.state_dict(), filename + "~", **kwargs)
+    os.rename(filename + "~", filename)
+    print(f"[save_model_checkpoint] {filename}")
+    return filename
+
+
+def load_model_checkpoint(
+    model,
+    dir_model=None,
+    step=None,
+    fn_ckpt="ckpt_BEST.pt",
+    fn_ckpt_step="ckpt_{:04d}.pt",
+    **kwargs,
+):
+    """ """
+    filename = fn_ckpt
+    if step is not None:
+        filename = fn_ckpt_step
+    if dir_model is not None:
+        filename = os.path.join(dir_model, filename)
+    if (step is not None) and (step >= 0):
+        # Load checkpoint specified by step
+        filename = filename.format(step)
+    elif step is not None:
+        # Load recent checkpoint if step < 0
+        unformatted = filename.replace(
+            filename[filename.find("{") + 1 : filename.find("}")],
+            "",
+        )
+        list_filename = []
+        list_step = []
+        for filename in glob.glob(unformatted.format("*")):
+            output = re.findall(r"\d+", os.path.basename(filename))
+            if len(output) == 1:
+                list_filename.append(filename)
+                list_step.append(int(output[0]))
+        if len(list_filename) == 0:
+            print("[load_model_checkpoint] No prior checkpoint found")
+            return 0
+        list_filename = [list_filename[_] for _ in np.argsort(list_step)]
+        filename = list_filename[step]
+    state_dict = torch.load(filename, **kwargs)
+    model.load_state_dict(state_dict, strict=True, assign=False)
+    print(f"[load_model_checkpoint] {filename}")
+    if (step is not None) and (step < 0):
+        return list_step[step]
+    return filename
+
+
+def set_trainable(
+    model,
+    trainable=False,
+    trainable_layers=None,
+    trainable_batchnorm=None,
+    verbose=True,
+):
+    """ """
+    if not trainable:
+        model.train(trainable)
+        trainable_params = []
+    elif trainable_layers is None:
+        model.train(trainable)
+        trainable_params = list(model.parameters())
+    else:
+        trainable_layers_names = []
+        trainable_params_names = []
+        trainable_params = []
+        model.train(False)
+        if verbose:
+            print(f"[set_trainable] {trainable_layers=}")
+        for m_name, m in model.named_modules():
+            msg = f"invalid trainable_layers ({m_name} -> multiple matches)"
+            for pattern in trainable_layers:
+                if pattern in m_name:
+                    assert m_name not in trainable_layers_names, msg
+                    trainable_layers_names.append(m_name)
+                    m.train(trainable)
+                    if verbose:
+                        print(f"{m_name} ('{pattern}') -> {m.training}")
+                    for p_basename, p in m.named_parameters():
+                        p_name = f"{m_name}.{p_basename}"
+                        assert p_name not in trainable_params_names, msg
+                        trainable_params_names.append(p_name)
+                        trainable_params.append(p)
+                        if verbose:
+                            print(f"|__ {p_name} {p.shape}")
+            if trainable_batchnorm is not None:
+                if "batchnorm" in str(type(m)).lower():
+                    m.train(trainable_batchnorm)
+                    if verbose:
+                        print(f"{m_name} ({trainable_batchnorm=}) -> {m.training}")
+        if verbose:
+            print(f"[set_trainable] {len(trainable_layers_names)=}")
+    if verbose:
+        print(f"[set_trainable] {trainable} -> {len(trainable_params)=}")
+    return trainable_params
 
 
 class FIRFilterbank(torch.nn.Module):
@@ -473,365 +564,6 @@ def gammatone_filter_fir(
     if scalar_input:
         fir = fir[0]
     return fir
-
-
-def calculate_same_pad(input_dim, kernel_dim, stride):
-    """ """
-    pad = (np.ceil(input_dim / stride) - 1) * stride + (kernel_dim - 1) + 1 - input_dim
-    return int(max(pad, 0))
-
-
-def custom_conv_pad(x, pad, weight=None, stride=None, **kwargs):
-    """ """
-    msg = f"Expected input shape [batch, channel, freq, time]: received {x.shape=}"
-    assert x.ndim == 4, msg
-    msg = f"Expected tuple or integers or a string: received {pad=}"
-    assert isinstance(pad, (tuple, str)), msg
-    if isinstance(pad, str):
-        if pad.lower() == "same":
-            pad_f = calculate_same_pad(x.shape[-2], weight.shape[-2], stride[-2])
-            pad_t = calculate_same_pad(x.shape[-1], weight.shape[-1], stride[-1])
-        elif pad.lower() in ["same_freq", "valid_time"]:
-            pad_f = calculate_same_pad(x.shape[-2], weight.shape[-2], stride[-2])
-            pad_t = 0
-        elif pad.lower() in ["same_time", "valid_freq"]:
-            pad_f = 0
-            pad_t = calculate_same_pad(x.shape[-1], weight.shape[-1], stride[-1])
-        elif pad.lower() == "valid":
-            pad_f = 0
-            pad_t = 0
-        else:
-            raise ValueError(f"Mode `{pad=}` is not recognized")
-        pad = (pad_t // 2, pad_t - pad_t // 2, pad_f // 2, pad_f - pad_f // 2)
-    return torch.nn.functional.pad(x, pad, **kwargs)
-
-
-class ChannelwiseConv2d(torch.nn.Module):
-    def __init__(self, kernel, pad=(0, 0), stride=(1, 1), dtype=torch.float32):
-        """ """
-        super().__init__()
-        assert kernel.ndim == 2, "Expected kernel with shape [freq, time]"
-        self.register_buffer(
-            "weight",
-            torch.tensor(kernel[None, None, :, :], dtype=dtype),
-            persistent=True,
-        )
-        self.pad = pad
-        self.stride = stride
-
-    def forward(self, x):
-        """ """
-        y = custom_conv_pad(
-            x,
-            pad=self.pad,
-            weight=self.weight,
-            stride=self.stride,
-            mode="constant",
-            value=0,
-        )
-        y = y.view(-1, 1, *y.shape[-2:])
-        y = torch.nn.functional.conv2d(
-            input=y,
-            weight=self.weight,
-            bias=None,
-            stride=self.stride,
-            padding="valid",
-            dilation=1,
-            groups=1,
-        )
-        y = y.view(*x.shape[:-2], *y.shape[-2:])
-        return y
-
-
-class HanningPooling(ChannelwiseConv2d):
-    def __init__(
-        self,
-        stride=[1, 1],
-        kernel_size=[1, 1],
-        padding="same",
-        sqrt_window=False,
-        normalize=False,
-        dtype=torch.float32,
-    ):
-        """ """
-        kernel = torch.ones(kernel_size, dtype=dtype)
-        for dim, m in enumerate(kernel_size):
-            shape = [-1 if _ == dim else 1 for _ in range(len(kernel_size))]
-            kernel = kernel * torch.signal.windows.hann(
-                m,
-                sym=True,
-                dtype=dtype,
-            ).reshape(shape)
-        if sqrt_window:
-            kernel = torch.sqrt(kernel)
-        if normalize:
-            kernel = kernel / torch.sum(kernel)
-        super().__init__(kernel.numpy(), pad=padding, stride=stride, dtype=dtype)
-
-
-class CustomPaddedConv2d(torch.nn.Conv2d):
-    def __init__(self, *args, **kwargs):
-        """ """
-        self.pad = kwargs.get("padding", 0)
-        if isinstance(self.pad, int):
-            self.pad = (self.pad, self.pad)
-        if isinstance(self.pad, str):
-            kwargs["padding"] = 0
-        super().__init__(*args, **kwargs)
-
-    def forward(self, x):
-        """ """
-        y = custom_conv_pad(
-            x,
-            pad=self.pad,
-            weight=self.weight,
-            stride=self.stride,
-            mode="constant" if self.padding_mode == "zeros" else self.padding_mode,
-            value=0,
-        )
-        y = torch.nn.functional.conv2d(
-            input=y,
-            weight=self.weight,
-            bias=self.bias,
-            stride=self.stride,
-            padding=self.padding,
-            dilation=self.dilation,
-            groups=self.groups,
-        )
-        return y
-
-
-class CustomFlatten(torch.nn.Module):
-    def __init__(
-        self,
-        start_dim=0,
-        end_dim=-1,
-        permute_dims=None,
-    ):
-        """ """
-        super().__init__()
-        self.start_dim = start_dim
-        self.end_dim = end_dim
-        self.permute_dims = permute_dims
-
-    def forward(self, x):
-        """ """
-        if self.permute_dims is not None:
-            x = torch.permute(x, dims=self.permute_dims)
-        return torch.flatten(x, start_dim=self.start_dim, end_dim=self.end_dim)
-
-
-class CustomNorm(torch.nn.Module):
-    def __init__(
-        self,
-        input_shape=[None, None, None, None],
-        dim_affine=None,
-        dim_norm=None,
-        correction=1,
-        eps=1e-05,
-        dtype=torch.float32,
-    ):
-        """ """
-        super().__init__()
-        self.input_shape = input_shape
-        self.dim_affine = dim_affine
-        self.dim_norm = dim_norm
-        self.correction = correction
-        self.eps = eps
-        self.dtype = dtype
-        if self.dim_affine is not None:
-            msg = "`input_shape` is required when `dim_affine` is not None"
-            assert self.input_shape is not None, msg
-            size = input_shape[self.dim_affine]
-            self.shape = [1 for _ in self.input_shape]
-            self.shape[self.dim_affine] = input_shape[self.dim_affine]
-            self.weight = torch.nn.parameter.Parameter(
-                data=torch.squeeze(torch.ones(size, dtype=self.dtype)),
-                requires_grad=True,
-            )
-            self.bias = torch.nn.parameter.Parameter(
-                data=torch.squeeze(torch.zeros(size, dtype=self.dtype)),
-                requires_grad=True,
-            )
-
-    def forward(self, x):
-        """ """
-        x_var, x_mean = torch.var_mean(
-            x, dim=self.dim_norm, correction=self.correction, keepdim=True
-        )
-        y = (x - x_mean) / torch.sqrt(x_var + self.eps)
-        if self.dim_affine is not None:
-            w = self.weight.view(self.shape)
-            b = self.bias.view(self.shape)
-            y = (y * w) + b
-        return y
-
-
-class Permute(torch.nn.Module):
-    def __init__(self, dims=None):
-        """ """
-        super().__init__()
-        self.dims = dims
-
-    def forward(self, x):
-        """ """
-        return torch.permute(x, dims=self.dims)
-
-
-class Reshape(torch.nn.Module):
-    def __init__(self, shape=None):
-        """ """
-        super().__init__()
-        self.shape = shape
-
-    def forward(self, x):
-        """ """
-        return torch.reshape(x, shape=self.shape)
-
-
-class Unsqueeze(torch.nn.Module):
-    def __init__(self, dim=None):
-        """ """
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, x):
-        """ """
-        return torch.unsqueeze(x, dim=self.dim)
-
-
-class RandomSlice(torch.nn.Module):
-    def __init__(self, size=[50, 20000], buffer=[0, 0], **kwargs):
-        """ """
-        super().__init__()
-        self.size = size
-        self.pre_crop_slice = []
-        for b in buffer:
-            if b is None:
-                self.pre_crop_slice.append(slice(None))
-            elif isinstance(b, int) and b > 0:
-                self.pre_crop_slice.append(slice(b, -b))
-            elif isinstance(b, int) and b == 0:
-                self.pre_crop_slice.append(slice(None))
-            elif isinstance(b, (tuple, list)):
-                self.pre_crop_slice.append(slice(*b))
-        self.crop = torchvision.transforms.RandomCrop(size=self.size, **kwargs)
-
-    def forward(self, x):
-        """ """
-        return self.crop(x[..., *self.pre_crop_slice])
-
-
-def save_model_checkpoint(
-    model,
-    dir_model=None,
-    step=None,
-    fn_ckpt="ckpt_BEST.pt",
-    fn_ckpt_step="ckpt_{:04d}.pt",
-    **kwargs,
-):
-    """ """
-    filename = fn_ckpt
-    if step is not None:
-        filename = fn_ckpt_step.format(step)
-    if dir_model is not None:
-        filename = os.path.join(dir_model, filename)
-    torch.save(model.state_dict(), filename + "~", **kwargs)
-    os.rename(filename + "~", filename)
-    print(f"[save_model_checkpoint] {filename}")
-    return filename
-
-
-def load_model_checkpoint(
-    model,
-    dir_model=None,
-    step=None,
-    fn_ckpt="ckpt_BEST.pt",
-    fn_ckpt_step="ckpt_{:04d}.pt",
-    **kwargs,
-):
-    """ """
-    filename = fn_ckpt
-    if step is not None:
-        filename = fn_ckpt_step
-    if dir_model is not None:
-        filename = os.path.join(dir_model, filename)
-    if (step is not None) and (step >= 0):
-        # Load checkpoint specified by step
-        filename = filename.format(step)
-    elif step is not None:
-        # Load recent checkpoint if step < 0
-        unformatted = filename.replace(
-            filename[filename.find("{") + 1 : filename.find("}")],
-            "",
-        )
-        list_filename = []
-        list_step = []
-        for filename in glob.glob(unformatted.format("*")):
-            output = re.findall(r"\d+", os.path.basename(filename))
-            if len(output) == 1:
-                list_filename.append(filename)
-                list_step.append(int(output[0]))
-        if len(list_filename) == 0:
-            print("[load_model_checkpoint] No prior checkpoint found")
-            return 0
-        list_filename = [list_filename[_] for _ in np.argsort(list_step)]
-        filename = list_filename[step]
-    state_dict = torch.load(filename, **kwargs)
-    model.load_state_dict(state_dict, strict=True, assign=False)
-    print(f"[load_model_checkpoint] {filename}")
-    if (step is not None) and (step < 0):
-        return list_step[step]
-    return filename
-
-
-def set_trainable(
-    model,
-    trainable=False,
-    trainable_layers=None,
-    trainable_batchnorm=None,
-    verbose=True,
-):
-    """ """
-    if not trainable:
-        model.train(trainable)
-        trainable_params = []
-    elif trainable_layers is None:
-        model.train(trainable)
-        trainable_params = list(model.parameters())
-    else:
-        trainable_layers_names = []
-        trainable_params_names = []
-        trainable_params = []
-        model.train(False)
-        if verbose:
-            print(f"[set_trainable] {trainable_layers=}")
-        for m_name, m in model.named_modules():
-            msg = f"invalid trainable_layers ({m_name} -> multiple matches)"
-            for pattern in trainable_layers:
-                if pattern in m_name:
-                    assert m_name not in trainable_layers_names, msg
-                    trainable_layers_names.append(m_name)
-                    m.train(trainable)
-                    if verbose:
-                        print(f"{m_name} ('{pattern}') -> {m.training}")
-                    for p_basename, p in m.named_parameters():
-                        p_name = f"{m_name}.{p_basename}"
-                        assert p_name not in trainable_params_names, msg
-                        trainable_params_names.append(p_name)
-                        trainable_params.append(p)
-                        if verbose:
-                            print(f"|__ {p_name} {p.shape}")
-            if trainable_batchnorm is not None:
-                if "batchnorm" in str(type(m)).lower():
-                    m.train(trainable_batchnorm)
-                    if verbose:
-                        print(f"{m_name} ({trainable_batchnorm=}) -> {m.training}")
-        if verbose:
-            print(f"[set_trainable] {len(trainable_layers_names)=}")
-    if verbose:
-        print(f"[set_trainable] {trainable} -> {len(trainable_params)=}")
-    return trainable_params
 
 
 def _batching_check(x, b):
