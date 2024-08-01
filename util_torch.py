@@ -2,15 +2,10 @@ import glob
 import os
 import re
 
-import h5py
 import numpy as np
 import torch
 import torchaudio
-import torchmetrics
 import torchvision
-
-import util_filters
-import util_misc
 
 
 def rms(x, dim=None, keepdim=False):
@@ -109,7 +104,7 @@ class FIRFilterbank(torch.nn.Module):
         """
         y = x
         if batching:
-            util_filters._batching_check(y, self.fir)
+            _batching_check(y, self.fir)
         else:
             y = y.unsqueeze(-2)
         unflatten_shape = y.shape[:-2]
@@ -181,7 +176,7 @@ class IIRFilterbank(torch.nn.Module):
         y (torch.Tensor): Filtered signal
         """
         if batching:
-            util_filters._batching_check(x, self.b)
+            _batching_check(x, self.b)
         y = torchaudio.functional.lfilter(
             x,
             self.a.view(-1, self.a.shape[-1]),
@@ -197,21 +192,21 @@ class GammatoneFilterbank(torch.nn.Module):
         self,
         sr=20e3,
         fir_dur=0.05,
-        cfs=util_filters.erbspace(8e1, 8e3, 50),
+        cfs=None,
         dtype=torch.float32,
         **kwargs,
     ):
         """ """
         super().__init__()
         if fir_dur is None:
-            filter_coeffs = util_filters.gammatone_filter_coeffs(
+            filter_coeffs = gammatone_filter_coeffs(
                 sr=sr,
                 cfs=cfs,
                 **kwargs,
             )
             self.fbs = [IIRFilterbank(**ba, dtype=dtype) for ba in filter_coeffs]
         else:
-            fir = util_filters.gammatone_filter_fir(
+            fir = gammatone_filter_fir(
                 sr=sr,
                 fir_dur=fir_dur,
                 cfs=cfs,
@@ -227,519 +222,257 @@ class GammatoneFilterbank(torch.nn.Module):
         return x
 
 
-class MiddleEarFilter(FIRFilterbank):
-    def __init__(
-        self,
-        sr=20e3,
-        order=512,
-        min_phase=True,
-        dtype=torch.float32,
-    ):
-        """ """
-        fir = util_filters.middle_ear_filter_fir(
-            sr=sr,
-            order=order,
-            min_phase=min_phase,
+def aud_filt_bw(cf):
+    """
+    Critical bandwidth of auditory filter at given center frequency.
+    Same as `audfiltbw.m` in the AMT.
+    """
+    return 24.7 + cf / 9.265
+
+
+def matched_z_transform(poles, zeros=None, sr=1.0, gain=None, f0db=None, _z_zeros=None):
+    """
+    Analog to digital filter using the matched Z-transform method.
+    See https://en.wikipedia.org/wiki/Matched_Z-transform_method.
+
+    Args
+    ----
+    poles (list or np.ndarray):
+        Poles in the s-plane with shape (n_poles,) or (n_filters, n_poles).
+    zeros (list or np.ndarray or None):
+        Zeros in the s-plane with shape (n_zeros,) or (n_filters, n_zeros).
+        If `None` the filter is all-pole.
+    sr (float): Sampling rate in Hz
+    gain (float or list or np.ndarray or None):
+        Continuous filter gain. If np.ndarray, must have shape (n_filters,).
+        If `None` and `f0db` is also `None`, no gain is applied and the first
+        coefficient in `b` is `1.0`.
+    f0db: (float or None):
+        Frequency at which the filter should have unit gain. If `None` and
+        `gain` is also `None`, no gain is applied and the first coefficient
+        in `b` is `1.0`.
+
+    Returns
+    -------
+    b (np.ndarray): Numerator coefficients with shape (n_filters, n_zeros + 1) or
+        (n_zeros + 1,)
+    a (np.ndarray): Denominator coefficients with shape (n_filters, n_poles + 1) or
+        (n_poles + 1,)
+    """
+    poles, poles_was_1d = _check_1d_or_2d(poles, "poles")
+    if zeros is None:
+        zeros, zeros_was_1d = np.empty((poles.shape[0], 0)), poles_was_1d
+    else:
+        zeros, zeros_was_1d = _check_1d_or_2d(zeros, "zeros")
+    both_1d = poles_was_1d and zeros_was_1d
+    both_2d = not poles_was_1d and not zeros_was_1d
+    if not both_1d and not both_2d:
+        raise ValueError("poles and zeros must have the same number of dimensions")
+    if both_2d and poles.shape[0] != zeros.shape[0]:
+        raise ValueError("poles and zeros must have the same shape along first axis")
+    z_poles = np.exp(poles / sr)
+    # _z_zeros is used for hard-setting the Z-domain zeros which is useful for the
+    # amt_classic and amt_allpole gammatone filters. It should not be used in general!
+    z_zeros = np.exp(zeros / sr) if _z_zeros is None else _z_zeros
+    # TODO: find a way to vectorize polyfromroots instead of lopping over b and a
+    b = np.empty((z_zeros.shape[0], z_zeros.shape[1] + 1))
+    a = np.empty((z_poles.shape[0], z_poles.shape[1] + 1))
+    for i in range(z_poles.shape[0]):
+        b[i, ::-1] = np.polynomial.polynomial.polyfromroots(z_zeros[i, :]).real
+        a[i, ::-1] = np.polynomial.polynomial.polyfromroots(z_poles[i, :]).real
+    if gain is not None and f0db is not None:
+        raise ValueError("cannot specify both gain and f0db")
+    elif gain is not None:
+        # _z_zeros cannot be used together with s-domain gain since calculating the
+        # corresponding Z-domain gain requires the initial s-domain zeros.
+        if _z_zeros is not None:
+            raise ValueError("cannot specify both gain and _z_zeros")
+        gain, _ = _check_0d_or_1d(gain, "gain")
+        z_gain = np.abs(
+            gain
+            * np.prod(-zeros, axis=1)
+            / np.prod(-poles, axis=1)
+            * np.prod(1 - z_poles, axis=1)
+            / np.prod(1 - z_zeros, axis=1)
         )
-        super().__init__(fir, dtype=dtype)
+        b = z_gain[:, None] * b
+    elif f0db is not None:
+        f0db, _ = _check_0d_or_1d(f0db)
+        z_f0db = np.exp(-1j * 2 * np.pi * f0db / sr)
+        z_gain = np.abs(
+            np.prod(1 - z_poles * z_f0db[:, None], axis=1)
+            / np.prod(1 - z_zeros * z_f0db[:, None], axis=1)
+        )
+        b = z_gain[:, None] * b
+    if both_1d:
+        b, a = b[0, :], a[0, :]
+    return b, a
 
 
-class DRNLFilterbank(torch.nn.Module):
-    def __init__(
-        self,
-        sr=20e3,
-        fir_dur=0.05,
-        cfs=util_filters.erbspace(8e1, 8e3, 50),
-        middle_ear=True,
-        lin_ngt=2,
-        lin_nlp=4,
-        lin_cfs=[-0.06762, 1.01679],
-        lin_bw=[0.03728, 0.78563],
-        lin_gain=[4.20405, -0.47909],
-        lin_lp_cutoff=[-0.06762, 1.01679],
-        nlin_ngt_before=3,
-        nlin_ngt_after=None,
-        nlin_nlp=3,
-        nlin_cfs_before=[-0.05252, 1.01650],
-        nlin_cfs_after=None,
-        nlin_bw_before=[-0.03193, 0.77426],
-        nlin_bw_after=None,
-        nlin_lp_cutoff=[-0.05252, 1.01650],
-        nlin_a=[1.40298, 0.81916],
-        nlin_b=[1.61912, -0.81867],
-        nlin_c=[np.log10(0.25), 0],
-        nlin_d=1,
-        filter_type="gtf",
-        iir_output="sos",
-        dtype=torch.float32,
-    ):
-        """
-        Dual-resonance non-linear filterbank.
-        Same as `lopezpoveda2001.m` in the AMT.
-        """
-        super().__init__()
-        if middle_ear:
-            self.middle_ear_filter = MiddleEarFilter(
-                sr=sr,
-                order=512,
-                min_phase=True,
-                dtype=dtype,
+def gammatone_filter_coeffs(
+    sr,
+    cfs,
+    order=4,
+    bw_mult=None,
+    filter_type="gtf",
+    iir_output="sos",
+):
+    """
+    Gammatone filter coefficients.
+
+    Parameters
+    ----------
+    sr (float):
+        Sampling rate in Hz
+    cfs (float or list or np.ndarray):
+        Center frequencies with shape (n_filters,)
+    order (int):
+        Filter order
+    bw_mult (float or np.ndarray or None):
+        Bandwidth scaling factor  with shape (n_filters,) or None,
+        in which case formula from [1]_ is used
+    filter_type (str): {"gtf", "apgf", "ozgf", "amt_classic", "amt_allpole"}
+        - "gtf": Accurate IIR equivalent by numerically calculating the s-place zeros.
+        - "apgf": All-pole approximation from [2]_.
+        - "ozgf": One-zero approximation from [2]_. The zero is set to 0 which matches
+          the DAPGF denomination in more recent papers by Lyon.
+        - "amt_classic": Mixed pole-zero approximation from [?]_.
+          Matches the "classic" option in the AMT.
+        - "amt_allpole": Same as "apgf" but uses a different scaling.
+          Matches the "allpole" option in the AMT.
+    iir_output (str): {"ba", "sos"}
+        Determines whether to return IIR filter coefficients as a single set of
+        `b` and `a` coefficients ("ba") or as a sequence of `b` and `a` coefficients
+        corresponding to second-order sections ("sos") to be applied successively.
+        For stability, "sos" is recommended, but is computationally more expensive.
+
+    Returns
+    -------
+    filter_coeffs (list of {"b": np.ndarray, "a" np.ndarray} dicts):
+        List of dicts containing numerator ("b") and denominator ("a") coefficients.
+        If iir_output == "ba", then the list will have a length of one
+        If iir_output == "sos", then the list will have a length equal to `order`
+        Each coefficient array will have a shape (n_filters, n_taps)
+
+    References
+    ----------
+    .. [1] J. Holdsworth, I. Nimmo-Smith, R. D. Patterson and P. Rice, "Annex C of the
+       SVOS final report: Implementing a gammatone filter bank", Annex C of APU report
+       2341, 1988.
+    .. [2] R. F. Lyon, "The all-pole gammatone filter and auditory models", in Proc.
+       Forum Acusticum, 1996.
+    """
+    cfs, scalar_input = _check_0d_or_1d(cfs, "cfs")
+    if bw_mult is None:
+        bw_mult = np.math.factorial(order - 1) ** 2 / (
+            np.pi * np.math.factorial(2 * order - 2) * 2 ** (-2 * order + 2)
+        )
+    bw = 2 * np.pi * bw_mult * aud_filt_bw(cfs)
+    wc = 2 * np.pi * cfs
+    pole = -bw + 1j * wc
+    poles = np.stack([pole, pole.conj()], axis=1)
+    zeros = None
+    _z_zeros = None
+    if filter_type == "gtf":
+        zeros = np.zeros((len(cfs), order))
+        for i in range(len(cfs)):
+            zeros[i, :] = np.polynomial.polynomial.polyroots(
+                np.polynomial.polynomial.polyadd(
+                    np.polynomial.polynomial.polypow([-pole[i], 1], order),
+                    np.polynomial.polynomial.polypow([-pole[i].conj(), 1], order),
+                )
+            ).real
+    elif filter_type == "apgf":
+        pass
+    elif filter_type == "ozgf":
+        zeros = np.zeros((len(cfs), 1))
+    elif filter_type in ["amt_classic", "amt_allpole"]:
+        # The MATLAB code sets the Z-domain zeros to the real part of the Z-domain
+        # poles, which seems wrong! Moreover, those zeros are used for calculating
+        # the gain for both classic and allpole, which is probably why a warning is
+        # raised about the scaling being wrong for allpole!
+        _z_zeros = np.stack(order * [np.exp((pole) / sr).real], axis=1)
+    else:
+        raise ValueError(f"invalid filter_type, got {filter_type}")
+    if iir_output == "ba":
+        print(
+            "Using iir_output='ba' can lead to numerically unstable "
+            "gammatone filters. Consider using iir_output='sos' instead."
+        )
+        poles = np.tile(poles, (1, order))
+        b, a = matched_z_transform(poles, zeros, sr=sr, f0db=cfs, _z_zeros=_z_zeros)
+        if filter_type == "amt_allpole":
+            b = b[:, :1]
+        filter_coeffs = [{"b": b, "a": a}]
+    elif iir_output == "sos":
+        filter_coeffs = []
+        for i in range(order):
+            zeros_i = None if zeros is None else zeros[:, i : i + 1]
+            _z_zeros_i = None if _z_zeros is None else _z_zeros[:, i : i + 1]
+            b, a = matched_z_transform(
+                poles, zeros_i, sr=sr, f0db=cfs, _z_zeros=_z_zeros_i
             )
-        else:
-            self.middle_ear_filter = None
-        if nlin_ngt_after is None:
-            nlin_ngt_after = nlin_ngt_before
-        if nlin_cfs_after is None:
-            nlin_cfs_after = nlin_cfs_before
-        if nlin_bw_after is None:
-            nlin_bw_after = nlin_bw_before
+            if filter_type == "amt_allpole":
+                b = b[:, :1]
+            b = np.hstack([b, np.zeros((len(cfs), 3 - b.shape[-1]))])
+            filter_coeffs.append({"b": b, "a": a})
+    else:
+        raise ValueError(f"iir_output must be `ba` or `sos`, got `{iir_output}`")
+    if scalar_input:
+        filter_coeffs = [{"b": _["b"][0], "a": _["a"][0]} for _ in filter_coeffs]
+    return filter_coeffs
 
-        def polfun(x, par):
-            return 10 ** par[0] * x ** par[1]
 
-        lin_cfs = polfun(cfs, lin_cfs)
-        lin_bw = polfun(cfs, lin_bw)
-        lin_lp_cutoff = polfun(cfs, lin_lp_cutoff)
-        lin_gain = polfun(cfs, lin_gain)
-        nlin_cfs_before = polfun(cfs, nlin_cfs_before)
-        nlin_cfs_after = polfun(cfs, nlin_cfs_after)
-        nlin_bw_before = polfun(cfs, nlin_bw_before)
-        nlin_bw_after = polfun(cfs, nlin_bw_after)
-        nlin_lp_cutoff = polfun(cfs, nlin_lp_cutoff)
-        nlin_a = polfun(cfs, nlin_a)
-        nlin_b = polfun(cfs, nlin_b)
-        nlin_c = polfun(cfs, nlin_c)
-        if fir_dur is None:
-            kwargs_gammatone = {
-                "filter_type": filter_type,
-                "iir_output": iir_output,
-                "dtype": dtype,
-            }
-        else:
-            kwargs_gammatone = {
-                "dtype": dtype,
-            }
-        self.gtf_lin = GammatoneFilterbank(
-            sr=sr,
-            cfs=lin_cfs,
-            fir_dur=fir_dur,
-            order=lin_ngt,
-            bw_mult=lin_bw / util_filters.aud_filt_bw(lin_cfs),
-            **kwargs_gammatone,
+def gammatone_filter_fir(
+    sr,
+    cfs,
+    fir_dur=0.05,
+    order=4,
+    bw_mult=None,
+):
+    """
+    Finite impulse responses of Gammatone filter(s).
+    See `gammatone_filter_coeffs` for detailed parameters.
+
+    Args
+    ----
+    sr (float): Sampling rate in Hz
+    fir_dur (float): Duration of FIR in seconds
+    cfs (float or list or np.ndarray): Center frequencies with shape (n_filters,)
+    order (int):  Filter order
+    bw_mult (float or np.ndarray or None): Bandwidth scaling factor
+
+    Returns
+    -------
+    fir (np.ndarray): impulse responses with shape (n_filters, int(sr * fir_dur))
+    """
+    cfs, scalar_input = _check_0d_or_1d(cfs, "cfs")
+    if bw_mult is None:
+        bw_mult = np.math.factorial(order - 1) ** 2 / (
+            np.pi * np.math.factorial(2 * order - 2) * 2 ** (-2 * order + 2)
         )
-        self.gtf_nlin_before = GammatoneFilterbank(
-            sr=sr,
-            cfs=nlin_cfs_before,
-            fir_dur=fir_dur,
-            order=nlin_ngt_before,
-            bw_mult=nlin_bw_before / util_filters.aud_filt_bw(nlin_cfs_before),
-            **kwargs_gammatone,
-        )
-        self.gtf_nlin_after = GammatoneFilterbank(
-            sr=sr,
-            cfs=nlin_cfs_after,
-            fir_dur=fir_dur,
-            order=nlin_ngt_after,
-            bw_mult=nlin_bw_after / util_filters.aud_filt_bw(nlin_cfs_after),
-            **kwargs_gammatone,
-        )
-        self.lpf_lin = IIRFilterbank(
-            *util_filters.butter(2, lin_lp_cutoff / (sr / 2)),
-            dtype=dtype,
-        )
-        self.lpf_nlin = IIRFilterbank(
-            *util_filters.butter(2, nlin_lp_cutoff / (sr / 2)),
-            dtype=dtype,
-        )
-        self.register_buffer("lin_gain", torch.tensor(lin_gain, dtype=dtype))
-        self.register_buffer("nlin_a", torch.tensor(nlin_a, dtype=dtype))
-        self.register_buffer("nlin_b", torch.tensor(nlin_b, dtype=dtype))
-        self.register_buffer("nlin_c", torch.tensor(nlin_c, dtype=dtype))
-        self.register_buffer("nlin_d", torch.tensor(nlin_d, dtype=dtype))
-        self.register_buffer("lin_nlp", torch.tensor(lin_nlp))
-        self.register_buffer("nlin_nlp", torch.tensor(nlin_nlp))
+    else:
+        bw_mult = np.array(bw_mult)
+    bw = 2 * np.pi * bw_mult * aud_filt_bw(cfs)
+    wc = 2 * np.pi * cfs
 
-    def forward(self, x):
-        """ """
-        unbatched = x.ndim == 1
-        if unbatched:
-            x = x[None, :]
-        # Middle ear filter
-        if self.middle_ear_filter is not None:
-            x = x * 10 ** ((93.98 - 100) / 20)
-            x = self.middle_ear_filter(x)
-        y_lin = torch.einsum("bi,bj->bij", (self.lin_gain[None, :], x))
-        # Linear path gammatone filterbank
-        y_lin = self.gtf_lin(y_lin, batching=True)
-        # Linear path lowpass filter
-        for _ in range(self.lin_nlp):
-            y_lin = self.lpf_lin(y_lin, batching=True)
-        # Nonlinear path gammatone filterbank (before nonlinearity)
-        y_nlin = self.gtf_nlin_before(x, batching=False)
-        # Broken stick nonlinearity
-        y_nlin = y_nlin.sign() * torch.minimum(
-            self.nlin_a[:, None] * y_nlin.abs() ** self.nlin_d,
-            self.nlin_b[:, None] * y_nlin.abs() ** self.nlin_c[:, None],
-        )
-        # Nonlinear path gammatone filterbank (after nonlinearity)
-        y_nlin = self.gtf_nlin_after(y_nlin, batching=True)
-        # Nonlinear path lowpass filter
-        for _ in range(self.nlin_nlp):
-            y_nlin = self.lpf_nlin(y_nlin, batching=True)
-        # Combine linear and nonlinear path
-        y = y_lin + y_nlin
-        if unbatched:
-            y = y[0, :]
-        return y
-
-
-class IHCTransduction(torch.nn.Module):
-    def __init__(
-        self,
-        compression_power=None,
-        compression_dbspl_min=None,
-        compression_dbspl_max=None,
-        rectify=True,
-        dtype=torch.float32,
-    ):
-        """ """
-        super().__init__()
-        if compression_power is not None:
-            self.register_buffer(
-                "compression_power",
-                torch.tensor(compression_power, dtype=dtype),
-            )
-        else:
-            self.compression_power = None
-        if compression_dbspl_min is not None:
-            self.compression_pa_min = torch.tensor(
-                20e-6 * np.power(10, compression_dbspl_min / 20),
-                dtype=dtype,
-            )
-        else:
-            self.compression_pa_min = torch.tensor(-np.inf, dtype=dtype)
-        if compression_dbspl_max is not None:
-            self.compression_pa_max = torch.tensor(
-                20e-6 * np.power(10, compression_dbspl_max / 20),
-                dtype=dtype,
-            )
-        else:
-            self.compression_pa_max = torch.tensor(np.inf, dtype=dtype)
-        self.rectify = rectify
-
-    def forward(self, x):
-        """ """
-        if self.compression_power is not None:
-            # Broken-stick compression (power compression between
-            # compression_dbspl_min and compression_dbspl_max)
-            if self.compression_power.ndim > 0:
-                if not self.compression_power.ndim == x.ndim:
-                    shape = [1 for _ in range(x.ndim)]
-                    shape[-2] = x.shape[-2]
-                    self.compression_power = self.compression_power.view(*shape)
-            abs_x = torch.abs(x)
-            IDX_COMPRESSION = torch.logical_and(
-                abs_x >= self.compression_pa_min,
-                abs_x < self.compression_pa_max,
-            )
-            IDX_AMPLIFICATION = abs_x < self.compression_pa_min
-            x = torch.sign(x) * torch.where(
-                IDX_COMPRESSION,
-                abs_x**self.compression_power,
-                torch.where(
-                    IDX_AMPLIFICATION,
-                    abs_x * (self.compression_pa_min ** (self.compression_power - 1)),
-                    abs_x,
-                ),
-            )
-        if self.rectify:
-            # Half-wave rectification
-            x = torch.nn.functional.relu(x, inplace=False)
-        return x
-
-
-class IHCLowpassFilter(FIRFilterbank):
-    def __init__(
-        self,
-        sr_input=20e3,
-        sr_output=10e3,
-        fir_dur=0.05,
-        cutoff=3e3,
-        order=7,
-        dtype=torch.float32,
-    ):
-        """ """
-        fir = util_filters.ihc_lowpass_filter_fir(
-            sr=sr_input,
-            fir_dur=fir_dur,
-            cutoff=cutoff,
-            order=order,
-        )
-        stride = int(sr_input / sr_output)
-        msg = f"{sr_input=} and {sr_output=} require non-integer stride"
-        assert np.isclose(stride, sr_input / sr_output), msg
-        super().__init__(fir, dtype=dtype, stride=stride)
-
-
-class ModulationFilterbank(torch.nn.Module):
-    def __init__(
-        self,
-        sr=10e3,
-        fir_dur=0.5,
-        lmf=0,
-        umf=1500,
-        Q=2,
-        bw=2,
-        flatten_channels=True,
-        dtype=torch.float32,
-    ):
-        """ """
-        super().__init__()
-        self.flatten_channels = flatten_channels
-        if fir_dur is None:
-            filter_coeffs = util_filters.mfbtd_filter_coeffs(
-                sr=sr,
-                lmf=lmf,
-                umf=umf,
-                Q=Q,
-                bw=bw,
-            )
-            self.fbs = [IIRFilterbank(**ba, dtype=dtype) for ba in filter_coeffs]
-        else:
-            fir = util_filters.mfbtd_filter_fir(
-                sr=sr,
-                fir_dur=fir_dur,
-                lmf=lmf,
-                umf=umf,
-                Q=Q,
-                bw=bw,
-            )
-            self.fbs = [FIRFilterbank(fir, dtype=dtype)]
-        self.fbs = torch.nn.ModuleList(self.fbs)
-
-    def forward(self, x, batching=False):
-        """ """
-        for itr, fb in enumerate(self.fbs):
-            x = fb(x, batching=batching or itr > 0)
-        if self.flatten_channels:
-            assert x.ndim == 5, "expected shape [batch, spont, freq, mod, time]"
-            x = torch.transpose(x, -2, -3)
-            x = torch.flatten(x, start_dim=-4, end_dim=-3)
-        return x
-
-
-class Hilbert(torch.nn.Module):
-    def __init__(self, dim=-1):
-        """
-        Compute the analytic signal, using the Hilbert transform
-        (torch implementation of `scipy.signal.hilbert`)
-        """
-        super().__init__()
-        self.dim = dim
-
-    @torch.cuda.amp.custom_fwd(cast_inputs=torch.float32)
-    def forward(self, x):
-        """ """
-        n = x.shape[self.dim]
-        X = torch.fft.fft(x, n=n, dim=self.dim, norm=None)
-        h = torch.zeros(n, dtype=X.dtype).to(X.device)
-        if n % 2 == 0:
-            h[0] = h[n // 2] = 1
-            h[1 : n // 2] = 2
-        else:
-            h[0] = 1
-            h[1 : (n + 1) // 2] = 2
-        ind = [np.newaxis] * x.ndim
-        ind[self.dim] = slice(None)
-        return torch.fft.ifft(
-            X * h[ind],
-            n=n,
-            dim=self.dim,
-            norm=None,
-        )
-
-
-class HilbertEnvelope(torch.nn.Module):
-    def __init__(self, **args):
-        """ """
-        super().__init__()
-        self.hilbert = Hilbert(**args)
-
-    def forward(self, x):
-        return torch.abs(self.hilbert(x))
-
-
-class SigmoidRateLevelFunction(torch.nn.Module):
-    def __init__(
-        self,
-        rate_spont=[0.0, 0.0, 0.0],
-        rate_max=[250.0, 250.0, 250.0],
-        threshold=[0.0, 12.0, 28.0],
-        dynamic_range=[20.0, 40.0, 80.0],
-        dynamic_range_interval=0.95,
-        compression_power=None,
-        compression_power_default=0.3,
-        envelope_mode=True,
-        dtype=torch.float32,
-    ):
-        """ """
-        super().__init__()
-        if compression_power is not None:
-            # Explicitly incorporate power compression into the rate-level function
-            self.register_buffer(
-                "compression_power",
-                torch.tensor(compression_power, dtype=dtype),
-            )
-            if compression_power_default is not None:
-                # Adjust threshold and dynamic range for `compression_power_default`
-                shift = 20 * np.log10(20e-6 ** (compression_power_default - 1))
-                threshold = np.array(threshold) * compression_power_default + shift
-                dynamic_range = np.array(dynamic_range) * compression_power_default
-        else:
-            self.compression_power = None
-        # Check arguments and register tensors with channel-specific shapes
-        assert np.all(rate_max > rate_spont), "rate_max must be greater than rate_spont"
-        argument_lengths = [
-            len(rate_spont),
-            len(rate_max),
-            len(threshold),
-            len(dynamic_range),
-        ]
-        channel_specific_size = [1, max(argument_lengths), 1, 1]
-        rate_spont = self.resize(rate_spont, channel_specific_size)
-        rate_max = self.resize(rate_max, channel_specific_size)
-        threshold = self.resize(threshold, channel_specific_size)
-        dynamic_range = self.resize(dynamic_range, channel_specific_size)
-        y_threshold = (1 - dynamic_range_interval) / 2
-        k = np.log((1 / y_threshold) - 1) / (dynamic_range / 2)
-        x0 = threshold - (np.log((1 / y_threshold) - 1) / (-k))
-        self.register_buffer(
-            "rate_spont", torch.tensor(rate_spont, dtype=dtype), persistent=True
-        )
-        self.register_buffer(
-            "rate_max", torch.tensor(rate_max, dtype=dtype), persistent=True
-        )
-        self.register_buffer(
-            "threshold", torch.tensor(threshold, dtype=dtype), persistent=True
-        )
-        self.register_buffer(
-            "dynamic_range", torch.tensor(dynamic_range, dtype=dtype), persistent=True
-        )
-        self.register_buffer(
-            "dynamic_range_interval",
-            torch.tensor(dynamic_range_interval, dtype=dtype),
-            persistent=True,
-        )
-        self.register_buffer(
-            "y_threshold", torch.tensor(y_threshold, dtype=dtype), persistent=True
-        )
-        self.register_buffer("k", torch.tensor(k, dtype=dtype), persistent=True)
-        self.register_buffer("x0", torch.tensor(x0, dtype=dtype), persistent=True)
-        # Construct envelope extraction function if needed
-        self.envelope_mode = envelope_mode
-        if self.envelope_mode:
-            self.envelope_function = HilbertEnvelope(dim=-1)
-
-    def resize(self, x, shape):
-        """ """
-        x = np.array(x).reshape([-1])
-        if len(x) == 1:
-            x = np.full(shape, x[0])
-        else:
-            x = np.reshape(x, shape)
-        return x
-
-    def forward(self, tensor_subbands):
-        """ """
-        while tensor_subbands.ndim < 4:
-            tensor_subbands = tensor_subbands.unsqueeze(-3)
-        if self.envelope_mode:
-            # Subband envelopes are passed through sigmoid and recombined with TFS
-            tensor_env = self.envelope_function(tensor_subbands)
-            tensor_tfs = torch.divide(tensor_subbands, tensor_env)
-            tensor_tfs = torch.where(
-                torch.isfinite(tensor_tfs), tensor_tfs, tensor_subbands
-            )
-            tensor_pa = tensor_env
-        else:
-            # Subbands are passed through sigmoid (alters spike timing at high levels)
-            tensor_pa = tensor_subbands
-        if self.compression_power is not None:
-            # Apply power compression (supports frequency-specific power compression)
-            tensor_pa = tensor_pa ** self.compression_power.view(1, 1, -1, 1)
-        # Compute sigmoid function with tensor broadcasting
-        x = 20.0 * torch.log(tensor_pa / 20e-6) / np.log(10)
-        y = 1.0 / (1.0 + torch.exp(-self.k * (x - self.x0)))
-        if self.envelope_mode:
-            y = y * tensor_tfs
-        tensor_rates = self.rate_spont + (self.rate_max - self.rate_spont) * y
-        return tensor_rates
-
-
-class BinomialSpikeGenerator(torch.nn.Module):
-    def __init__(
-        self,
-        sr=10000,
-        mode="approx",
-        n_per_channel=[384, 160, 96],
-        n_per_step=48,
-        dtype=torch.float32,
-    ):
-        """ """
-        super().__init__()
-        self.sr = sr
-        self.mode = mode
-        self.n_per_step = n_per_step
-        self.register_buffer(
-            "n_per_channel",
-            torch.tensor(n_per_channel, dtype=dtype).view([-1]),
-            persistent=True,
-        )
-
-    def forward(self, tensor_rates):
-        """ """
-        msg = "Requires input shape [batch, channel, freq, time]"
-        assert tensor_rates.ndim == 4, msg
-        tensor_probs = tensor_rates / self.sr
-        if self.mode == "approx":
-            # Sample from normal approximation of binomial distribution
-            n = self.n_per_channel.view([1, -1, 1, 1])
-            p = tensor_probs
-            sample = torch.distributions.normal.Normal(
-                loc=n * p,
-                scale=torch.sqrt(n * p * (1 - p)),
-                validate_args=False,
-            ).rsample()
-            tensor_spike_counts = torch.round(torch.nn.functional.relu(sample))
-        elif self.mode == "exact":
-            # Binomial distribution implemented as sum of Bernoulli random variables
-            n = self.n_per_channel
-            p = tensor_probs
-            assert (n.ndim == 1) and (n.shape[0] == p.shape[1])
-            tensor_spike_counts = torch.zeros_like(p)
-            for channel in range(p.shape[1]):
-                total = int(n[channel])
-                count = 0
-                while count < total:
-                    n_sample_per_step = min(self.n_per_step, total - count)
-                    sample = (
-                        torch.rand(
-                            size=(n_sample_per_step, *p[:, channel, :, :].shape),
-                            device=self.n_per_channel.device,
-                        )
-                        < p[None, :, channel, :, :]
-                    )
-                    tensor_spike_counts[:, channel, :, :] += sample.sum(dim=0)
-                    count += n_sample_per_step
-        elif self.mode == "additive":
-            # Replace sampling with additive noise to enable back-propagation
-            n = self.n_per_channel.view([1, -1, 1, 1])
-            p = tensor_probs
-            noise = torch.randn_like(p) / n
-            tensor_spike_counts = torch.nn.functional.relu((p + noise) * n)
-        else:
-            raise NotImplementedError(f"mode=`{self.mode}` is not implemented")
-        return tensor_spike_counts
+    fir_ntaps = int(fir_dur * sr)
+    t = np.arange(fir_ntaps) / sr
+    a = (
+        2
+        / np.math.factorial(order - 1)
+        / np.abs(1 / bw**order + 1 / (bw + 2j * wc) ** order)
+        / sr
+    )
+    fir = (
+        a[:, None]
+        * t ** (order - 1)
+        * np.exp(-bw[:, None] * t[None, :])
+        * np.cos(wc[:, None] * t[None, :])
+    )
+    if scalar_input:
+        fir = fir[0]
+    return fir
 
 
 def calculate_same_pad(input_dim, kernel_dim, stride):
@@ -989,70 +722,6 @@ class RandomSlice(torch.nn.Module):
         return self.crop(x[..., *self.pre_crop_slice])
 
 
-class MultitaskCrossEntropyLoss(torch.nn.Module):
-    def __init__(
-        self,
-        task_list=[],
-        task_weights=None,
-        ignore_index=None,
-    ):
-        """ """
-        super().__init__()
-        self.task_list = task_list
-        self.task_weights = task_weights
-        self.ignore_index = ignore_index
-        self.loss_function = torch.nn.CrossEntropyLoss(
-            weight=None,
-            ignore_index=self.ignore_index,
-            reduction="none",
-            label_smoothing=0.0,
-        )
-        if self.task_weights is None:
-            self.task_weights = {k: torch.tensor(1.0) for k in self.task_list}
-
-    def forward(self, logits, targets, return_task_loss=True):
-        """ """
-        task_loss = {}
-        loss = 0
-        task_weights = self.task_weights
-        if (isinstance(task_weights, str)) and (task_weights == "random"):
-            tmp = logits[self.task_list[0]]
-            w = torch.rand(
-                size=(len(self.task_list), tmp.shape[0]),
-                device=tmp.device,
-            )
-            w = len(self.task_list) * w / torch.sum(w, dim=0, keepdim=True)
-            task_weights = {k: w[itr] for itr, k in enumerate(self.task_list)}
-        for k in self.task_list:
-            task_loss[k] = self.loss_function(logits[k], targets[k])
-            IDX = torch.isfinite(task_loss[k])
-            if task_weights[k].shape == IDX.shape:
-                tmp = task_weights[k][IDX] * task_loss[k][IDX]
-            else:
-                tmp = task_weights[k] * task_loss[k][IDX]
-            task_loss[k] = torch.nan_to_num(
-                torch.mean(tmp),
-                nan=0.0,
-                posinf=0.0,
-                neginf=0.0,
-            )
-            loss = loss + task_loss[k]
-        if return_task_loss:
-            return loss, task_loss
-        return loss
-
-
-class MultitaskMulticlassAccuracy(torchmetrics.wrappers.MultitaskWrapper):
-    def __init__(self, heads={}, **kwargs):
-        """ """
-        task_metrics = {}
-        for k, num_classes in heads.items():
-            task_metrics[k] = torchmetrics.classification.MulticlassAccuracy(
-                num_classes=num_classes, **kwargs
-            )
-        super().__init__(task_metrics)
-
-
 def save_model_checkpoint(
     model,
     dir_model=None,
@@ -1165,42 +834,62 @@ def set_trainable(
     return trainable_params
 
 
-class HDF5Dataset(torch.utils.data.Dataset):
-    def __init__(
-        self,
-        regex_filenames,
-        keys=None,
-    ):
-        """ """
-        super().__init__()
-        self.filenames = list(glob.glob(regex_filenames))
-        self.files = [h5py.File(_, "r") for _ in self.filenames]
-        self.keys = keys
-        if self.keys is None:
-            self.keys = util_misc.get_hdf5_dataset_key_list(self.files[0])
-            self.keys = [
-                key
-                for key in self.keys
-                if np.issubdtype(self.files[0][key].dtype, np.number)
-            ]
-        n = [self.files[0][key].shape[0] for key in self.keys]
-        assert len(np.unique(n)) == 1, "dataset keys must have same length"
-        self.n_per_file = [f[self.keys[0]].shape[0] for f in self.files]
-        self.index_map = []
-        for index_file in range(len(self.files)):
-            for index_data in range(self.n_per_file[index_file]):
-                self.index_map.append((index_file, index_data))
+def _batching_check(x, b):
+    """
+    Raises error if filterbank (parameterized with `b`) cannot be applied
+    channelwise to tensor `x`. The word batching here is confusing, as it
+    refers to applying a filterbank channelwise (a different filter for
+    each channel). The word batching is used to match argument from
+    `torchaudio.functional.lfilter`.
+    """
+    if x.ndim < 2:
+        raise ValueError("batching requires input with at least two dimensions")
+    if b.ndim != 2:
+        raise ValueError("batching requires filter to be two-dimensional")
+    if x.shape[-2] != b.shape[-2]:
+        raise ValueError(
+            "batching requires input and filter to have the same number of "
+            f"channels, got {x.shape[-2]} and {b.shape[-2]}"
+        )
 
-    def __getitem__(self, index):
-        """ """
-        index_file, index_data = self.index_map[index]
-        return {key: self.files[index_file][key][index_data] for key in self.keys}
 
-    def __len__(self):
-        """ """
-        return len(self.index_map)
+def _check_1d_or_2d(x, name="input"):
+    """
+    Checks if input is 1- or 2- dimensional, converts input to 2-dimensional
+    array, and returns bool indicating if input was 1-dimensional.
+    """
+    if not isinstance(x, (list, np.ndarray)):
+        raise TypeError(
+            f"{name} must be list or np.ndarray, got {x.__class__.__name__}"
+        )
+    if isinstance(x, list):
+        x = np.array(x)
+    is_1d = x.ndim == 1
+    if is_1d:
+        x = x[None, :]
+    elif x.ndim != 2:
+        raise ValueError(f"{name} must be one- or two-dimensional, got shape {x.shape}")
+    return x, is_1d
 
-    def __del__(self):
-        """ """
-        for f in self.files:
-            f.close()
+
+def _check_0d_or_1d(x, name="input"):
+    """
+    Checks if input is 0- or 1- dimensional, converts input to 1-dimensional
+    array, and returns bool indicating if input was 0-dimensional.
+    """
+    is_0d = (
+        isinstance(x, (int, float, np.integer, np.floating))
+        or isinstance(x, np.ndarray)
+        and x.ndim == 0
+    )
+    if is_0d:
+        x = np.array([x])
+    elif isinstance(x, list):
+        x = np.array(x)
+    elif not isinstance(x, np.ndarray):
+        raise TypeError(
+            f"{name} must be scalar or np.ndarray, got {x.__class__.__name__}"
+        )
+    if x.ndim != 1:
+        raise ValueError(f"{name} must be one-dimensional, got shape {x.shape}")
+    return x, is_0d
