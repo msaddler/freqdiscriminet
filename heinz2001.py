@@ -8,7 +8,7 @@ import pandas as pd
 import torch
 import torchmetrics
 
-import util_misc
+import util
 import util_torch
 
 from pure_tone_dataset import Dataset
@@ -184,7 +184,7 @@ def optimize(
             metric_loss.update(loss)
             metric_acc.update(torch.nn.functional.sigmoid(logits), targets)
             if step % num_steps_per_display == num_steps_per_display - 1:
-                display_str = util_misc.get_model_progress_display_str(
+                display_str = util.get_model_progress_display_str(
                     epoch=epoch + 1,
                     step=step + 1,
                     num_steps=step + 1,
