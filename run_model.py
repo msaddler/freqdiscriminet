@@ -10,10 +10,9 @@ import torchmetrics
 
 import util
 import util_torch
-
-from pure_tone_dataset import Dataset
-from peripheral_model import PeripheralModel
 from perceptual_model import PerceptualModel
+from peripheral_model import PeripheralModel
+from pure_tone_dataset import Dataset
 
 
 class Model(torch.nn.Module):
@@ -277,7 +276,7 @@ def main(dir_model=None, eval_mode=False, overwrite=False):
             log2_max - log2_min + 1,
             base=2,
         )
-        if ("specific" in dir_model) and (config_model.get("kwargs_dataset", False)):
+        if "f_max" in config_model["kwargs_dataset"]:
             interval_list = np.concatenate(
                 [interval_list] * 250 + [-1 * interval_list] * 250
             )
@@ -293,14 +292,14 @@ def main(dir_model=None, eval_mode=False, overwrite=False):
                     )
                 )
             ).reshape([-1])
-            if "interval_max" in config_model["kwargs_dataset"]:
-                interval_max = config_model["kwargs_dataset"]["interval_max"]
-                interval_list = interval_list[np.abs(interval_list) <= interval_max]
         else:
             interval_list = np.concatenate(
                 [interval_list] * 50 + [-1 * interval_list] * 50
             )
             f_list = np.power(2, (np.arange(np.log2(250.0), np.log2(10000.0), 1 / 5)))
+        if "interval_max" in config_model["kwargs_dataset"]:
+            interval_max = config_model["kwargs_dataset"]["interval_max"]
+            interval_list = interval_list[np.abs(interval_list) <= interval_max]
         dataset = Dataset(
             f_list=f_list,
             interval_list=interval_list,

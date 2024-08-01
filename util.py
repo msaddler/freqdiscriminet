@@ -1,11 +1,12 @@
-import os
 import glob
 import json
+import os
+import resource
+import time
+
 import numpy as np
 import pandas as pd
 import scipy
-import resource
-import time
 
 
 def logistic_function(x, x0, k, chance=0.5):
@@ -133,6 +134,72 @@ class ExperimentHeinz2001FrequencyDiscrimination(PsychoacousticExperiment):
         return df
 
 
+def get_model_progress_display_str(
+    epoch=None,
+    step=None,
+    num_steps=None,
+    t0=None,
+    mem=True,
+    loss=None,
+    task_loss={},
+    task_acc={},
+    single_line=True,
+):
+    """
+    Returns a string to print model progress.
+
+    Args
+    ----
+    epoch (int): current training epoch
+    step (int): current training step
+    num_steps (int): total steps taken since t0
+    t0 (float): start time in seconds
+    mem (bool): if True, include total memory usage
+    loss (float): current loss
+    task_loss (dict): current task-specific losses
+    task_acc (dict): current task-specific accuracies
+    single_line (bool): if True, remove linebreaks
+
+    Returns
+    -------
+    display_str (str): formatted string to print
+    """
+    display_str = ""
+    if (epoch is not None) and (step is not None):
+        display_str += "step {:02d}_{:06d} | ".format(epoch, step)
+    if (num_steps is not None) and (t0 is not None):
+        display_str += "{:.4f} s/step | ".format((time.time() - t0) / num_steps)
+    if mem:
+        display_str += "mem: {:06.3f} GB | ".format(
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
+        )
+    if loss is not None:
+        display_str += "loss: {:.4f} | ".format(loss)
+    if task_loss:
+        if isinstance(task_loss, dict):
+            display_str += "\n|___ task loss | "
+            for k, v in task_loss.items():
+                display_str += "{}: {:.4f} ".format(
+                    k.replace("label_", "").replace("_int", ""), v
+                )
+            display_str += "| "
+        else:
+            display_str += "task_loss: {:.4f} | ".format(task_loss)
+    if task_acc:
+        if isinstance(task_acc, dict):
+            display_str += "\n|___ task accs | "
+            for k, v in task_acc.items():
+                display_str += "{}: {:.4f} ".format(
+                    k.replace("label_", "").replace("_int", ""), v
+                )
+            display_str += "| "
+        else:
+            display_str += "task_acc: {:.4f} | ".format(task_acc)
+    if single_line:
+        display_str = display_str.replace("\n|___ ", "")
+    return display_str
+
+
 def format_axes(
     ax,
     str_title=None,
@@ -204,78 +271,24 @@ def format_axes(
     return ax
 
 
-def flatten_columns(df, sep="_"):
-    """
-    Flatten multi-level columns in a pandas DataFrame to single-level.
-    """
-    df.columns = [
-        col[0] if (len(col[0]) == 0) or (len(col[1]) == 0) else sep.join(col)
-        for col in df.columns.to_flat_index()
-    ]
-    return df
-
-
-def get_model_progress_display_str(
-    epoch=None,
-    step=None,
-    num_steps=None,
-    t0=None,
-    mem=True,
-    loss=None,
-    task_loss={},
-    task_acc={},
-    single_line=True,
-):
-    """
-    Returns a string to print model progress.
-
-    Args
-    ----
-    epoch (int): current training epoch
-    step (int): current training step
-    num_steps (int): total steps taken since t0
-    t0 (float): start time in seconds
-    mem (bool): if True, include total memory usage
-    loss (float): current loss
-    task_loss (dict): current task-specific losses
-    task_acc (dict): current task-specific accuracies
-    single_line (bool): if True, remove linebreaks
-
-    Returns
-    -------
-    display_str (str): formatted string to print
-    """
-    display_str = ""
-    if (epoch is not None) and (step is not None):
-        display_str += "step {:02d}_{:06d} | ".format(epoch, step)
-    if (num_steps is not None) and (t0 is not None):
-        display_str += "{:.4f} s/step | ".format((time.time() - t0) / num_steps)
-    if mem:
-        display_str += "mem: {:06.3f} GB | ".format(
-            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
-        )
-    if loss is not None:
-        display_str += "loss: {:.4f} | ".format(loss)
-    if task_loss:
-        if isinstance(task_loss, dict):
-            display_str += "\n|___ task loss | "
-            for k, v in task_loss.items():
-                display_str += "{}: {:.4f} ".format(
-                    k.replace("label_", "").replace("_int", ""), v
-                )
-            display_str += "| "
-        else:
-            display_str += "task_loss: {:.4f} | ".format(task_loss)
-    if task_acc:
-        if isinstance(task_acc, dict):
-            display_str += "\n|___ task accs | "
-            for k, v in task_acc.items():
-                display_str += "{}: {:.4f} ".format(
-                    k.replace("label_", "").replace("_int", ""), v
-                )
-            display_str += "| "
-        else:
-            display_str += "task_acc: {:.4f} | ".format(task_acc)
-    if single_line:
-        display_str = display_str.replace("\n|___ ", "")
-    return display_str
+def get_color_and_label_from_model_tag(model_tag):
+    """ """
+    if "human" in model_tag.lower():
+        color = "k"
+        label = "Human listeners"
+    elif "ihc3000" in model_tag.lower():
+        color = "#808088"
+        label = "3000 Hz IHC filter"
+    elif "ihc1000" in model_tag.lower():
+        color = "#28C8C8"
+        label = "1000 Hz IHC filter"
+    elif "ihc0320" in model_tag.lower():
+        color = "#8856a7"
+        label = "320 Hz IHC filter"
+    elif "ihc0050" in model_tag.lower():
+        color = "#F03C8C"
+        label = "50 Hz IHC filter"
+    else:
+        color = None
+        label = os.path.basename(model_tag)
+    return color, label

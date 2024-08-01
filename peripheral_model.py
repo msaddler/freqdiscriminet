@@ -1,6 +1,6 @@
+import numpy as np
 import torch
 import torchaudio
-import numpy as np
 
 import util_torch
 

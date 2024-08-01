@@ -1,7 +1,9 @@
-import sys
 import itertools
+import sys
+
 import numpy as np
 import torch
+
 import util_torch
 
 
