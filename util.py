@@ -269,26 +269,3 @@ def format_axes(
     for spine_key in spines_to_hide:
         ax.spines[spine_key].set_visible(False)
     return ax
-
-
-def get_color_and_label_from_model_tag(model_tag):
-    """ """
-    if "human" in model_tag.lower():
-        color = "k"
-        label = "Human listeners"
-    elif "ihc3000" in model_tag.lower():
-        color = "#808088"
-        label = "3000 Hz IHC filter"
-    elif "ihc1000" in model_tag.lower():
-        color = "#28C8C8"
-        label = "1000 Hz IHC filter"
-    elif "ihc0320" in model_tag.lower():
-        color = "#8856a7"
-        label = "320 Hz IHC filter"
-    elif "ihc0050" in model_tag.lower():
-        color = "#F03C8C"
-        label = "50 Hz IHC filter"
-    else:
-        color = None
-        label = os.path.basename(model_tag)
-    return color, label
