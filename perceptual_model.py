@@ -13,7 +13,9 @@ class PerceptualModel(torch.nn.Module):
         heads={"label": 1},
         device=None,
     ):
-        """ """
+        """
+        Construct torch DNN model graph from architecture description
+        """
         super().__init__()
         self.input_shape = input_shape
         self.body = collections.OrderedDict()

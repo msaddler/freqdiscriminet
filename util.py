@@ -43,7 +43,10 @@ class PsychoacousticExperiment:
         verbose=False,
         **kwargs,
     ):
-        """ """
+        """
+        Base class for running a psychoacoustic experiment on a
+        model (converts evaluation output file to a results file)
+        """
         self.read = read
         self.write = write
         self.overwrite = overwrite
@@ -101,7 +104,10 @@ class ExperimentHeinz2001FrequencyDiscrimination(PsychoacousticExperiment):
         basename_results="results.csv",
         **kwargs,
     ):
-        """ """
+        """
+        PsychoacousticExperiment class for pure tone frequency discrimination
+        experiment from Heinz et al. (2001, Neural Computation)
+        """
         super().__init__(
             basename_eval=basename_eval,
             basename_results=basename_results,

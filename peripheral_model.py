@@ -18,7 +18,10 @@ class PeripheralModel(torch.nn.Module):
         ihc_lowpass_cutoff=4.8e3,
         anf_per_channel=200,
     ):
-        """ """
+        """
+        PyTorch port of auditory nerve model from Heinz et al. (2001):
+        https://github.com/ModelDBRepository/37436/blob/master/anmodheinz00.c
+        """
         super().__init__()
         self.sr_input = sr_input
         self.sr_output = sr_output
@@ -42,21 +45,28 @@ class PeripheralModel(torch.nn.Module):
         self.anf_per_channel = anf_per_channel
 
     def f2x(self, f):
-        """ """
+        """
+        Map characteristic frequency to basilar membrane position
+        """
         msg = "frequency out of human range"
         assert np.all(np.logical_and(f >= 20, f <= 20677)), msg
         x = (1.0 / 0.06) * np.log10((f / 165.4) + 0.88)
         return x
 
     def x2f(self, x):
-        """ """
-        msg = "BM distance out of human range"
+        """
+        Map basilar membrane position to characteristic frequency
+        """
+        msg = "basilar membrane distance out of human range"
         assert np.all(np.logical_and(x >= 0, x <= 35)), msg
         f = 165.4 * (np.power(10.0, (0.06 * x)) - 0.88)
         return f
 
     def spike_generator(self, rate):
-        """ """
+        """
+        Map auditory nerve firing rates to spike counts
+        (independent binomial sampling at each time point)
+        """
         if self.anf_per_channel is None:
             return rate
         p = rate / self.sr_output
@@ -70,7 +80,19 @@ class PeripheralModel(torch.nn.Module):
         return spikes.sum(dim=0).to(rate.dtype)
 
     def forward(self, x):
-        """ """
+        """
+        Map sound waveforms to auditory nerve spike counts
+
+        Args
+        ----
+        x (torch.tensor): sound waveforms with shape
+            [batch, time, 2] or [batch, channels, time]
+
+        Returns
+        -------
+        x (torch.tensor): auditory nerve spike counts with shape
+            [batch, channels, characteristic frequency, time]
+        """
         if x.shape[-1] == 2:
             x = torch.swapaxes(x, -1, -2)
         x = self.gammatone_filterbank(x)

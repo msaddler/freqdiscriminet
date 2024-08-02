@@ -25,7 +25,13 @@ class Dataset(torch.utils.data.Dataset):
         dbspl_fixed=False,
         phase_fixed=0.0,
     ):
-        """ """
+        """
+        Torch dataset object for generating pure tone frequency
+        discrimination trials. In evaluation mode, frequencies
+        and intervals must be provided as lists. In optimization
+        mode, frequencies and intervals are randomly sampled from
+        log-uniform distributions.
+        """
         self.sr = sr
         self.dur = dur
         self.dur_ramp = dur_ramp

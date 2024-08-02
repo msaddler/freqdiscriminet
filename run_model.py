@@ -23,7 +23,10 @@ class Model(torch.nn.Module):
         input_shape=[2, 2, 10000],
         device=None,
     ):
-        """ """
+        """
+        Torch model object containing an auditory nerve model "front-end"
+        and a deep artificial neural network model "back-end"
+        """
         super().__init__()
         self.input_shape = input_shape
         self.peripheral_model = PeripheralModel(
@@ -53,7 +56,9 @@ def evaluate(
     device=None,
     overwrite=False,
 ):
-    """ """
+    """
+    Model evaluation routine writes model predictions to a CSV file
+    """
     print(f"[evaluate] {dir_model=}")
     print(f"[evaluate] {fn_ckpt=}")
     print(f"[evaluate] {fn_eval_output=}")
@@ -119,7 +124,9 @@ def optimize(
     num_workers=8,
     device=None,
 ):
-    """ """
+    """
+    Model optimization routine with intermittent validation checks
+    """
     logfile = os.path.join(dir_model, "log_optimize.csv")
     if os.path.exists(logfile):
         df = pd.read_csv(logfile)
@@ -253,7 +260,9 @@ def optimize(
 
 
 def main(dir_model=None, eval_mode=False, overwrite=False):
-    """ """
+    """
+    Run evaluation or optimization routine for specified model directory
+    """
     with open(os.path.join(dir_model, "config.json"), "r") as f:
         config_model = json.load(f)
     with open(os.path.join(dir_model, "arch.json"), "r") as f:
@@ -346,7 +355,9 @@ def main(dir_model=None, eval_mode=False, overwrite=False):
 
 
 if __name__ == "__main__":
-    """ """
+    """
+    Run model optimization or evaluation routine from the command line
+    """
     parser = argparse.ArgumentParser()
     parser.add_argument("-m", "--dir_model", type=str, default=None)
     parser.add_argument("-e", "--eval_mode", type=int, default=0)
