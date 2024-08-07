@@ -10,15 +10,6 @@
 #SBATCH --requeue
 
 declare -a list_dir_model=(
-    # "models/demo/freq_all/IHC3000/arch_0346_0000"
-    # "models/demo/freq_all/IHC1000/arch_0346_0000"
-    # "models/demo/freq_all/IHC0320/arch_0346_0000"
-    # "models/demo/freq_all/IHC0050/arch_0346_0000"
-    # "models/demo/freq_quarter_octave/2000hz/IHC3000/arch_0346_0000"
-    # "models/demo/freq_quarter_octave/2000hz/IHC1000/arch_0346_0000"
-    # "models/demo/freq_quarter_octave/2000hz/IHC0320/arch_0346_0000"
-    # "models/demo/freq_quarter_octave/2000hz/IHC0050/arch_0346_0000"
-
     "models/freq_all/IHC3000/arch_0346_0020"
     "models/freq_all/IHC3000/arch_0346_0017"
     "models/freq_all/IHC3000/arch_0346_0015"
