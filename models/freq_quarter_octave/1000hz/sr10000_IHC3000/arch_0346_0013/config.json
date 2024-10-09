@@ -1,0 +1,37 @@
+{
+    "kwargs_anmodel": {
+        "anf_per_channel": 200,
+        "fir_dur": null,
+        "ihc_lowpass_cutoff": 4800.0,
+        "max_cf": 10000.0,
+        "min_cf": 100.0,
+        "num_cf": 60,
+        "scale_gammatone_filterbank": 8.0,
+        "sr_input": 40000.0,
+        "sr_output": 10000.0
+    },
+    "kwargs_dataset": {
+        "f_max": 1090.5077326652577,
+        "f_min": 917.0040432046712,
+        "interval_max": 0.1,
+        "interval_min": 1e-06
+    },
+    "kwargs_optimize": {
+        "batch_size": 32,
+        "epochs": 20,
+        "kwargs_scheduler": {
+            "gamma": 0.1,
+            "milestones": [
+                5,
+                10,
+                15
+            ]
+        },
+        "learning_rate": 1e-05,
+        "steps_per_epoch": 1000,
+        "validation_steps": 100
+    },
+    "n_classes_dict": {
+        "label": 1
+    }
+}
