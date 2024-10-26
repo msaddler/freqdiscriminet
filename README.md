@@ -1,6 +1,6 @@
 ## freqdiscriminet
 
-Code to accompany the manuscript "Models optimized for real-world tasks reveal the necessity of precise temporal coding in hearing" by Mark R. Saddler and Josh H. McDermott (2024). This repository contains the code, models, and analyses for our comparisons between deep neural network and ideal observer models for pure tone frequency discrimination.
+Code to accompany the manuscript ["Models optimized for real-world tasks reveal the task-dependent necessity of precise temporal coding in hearing"](https://doi.org/10.1101/2024.04.21.590435) by Mark R. Saddler and Josh H. McDermott (2024). This repository contains the code, models, and analyses for our comparisons between deep neural network and ideal observer models for pure tone frequency discrimination.
 
 ## Dependencies
 
@@ -23,7 +23,7 @@ The [`util.py`](util.py) file contains helpful functions for analyzing and plott
 
 ## Notes
 
-To directly compare our deep neural network models with ideal observer models, we attempted to match the frequency discrimination experiment from [Heinz et al. (2001, Neural Computation)](https://doi.org/10.1162/089976601750541804) as closely as we could. We ported their [auditory nerve model](https://modeldb.science/37436) to PyTorch and trained deep neural networks to make pure tone frequency discrimination judgments (with stimulus parameters matched as closely as possible to the original paper). Frequency discrimination thresholds for the Siebert (1970) and Heinz et al. (2001) ideal observer models were scanned from Fig. 4a in the [Heinz et al. (2001, Neural Computation)](https://doi.org/10.1162/089976601750541804) paper.
+To directly compare our deep neural network models with ideal observer models, we attempted to match the frequency discrimination experiment from Heinz et al. (2001, Neural Computation) as closely as we could. We ported their [auditory nerve model](https://modeldb.science/37436) to PyTorch and trained deep neural networks to make pure tone frequency discrimination judgments (with stimulus parameters matched as closely as possible to the original paper). Frequency discrimination thresholds for the Siebert (1970) and Heinz et al. (2001) ideal observer models were scanned from Fig. 4a in the [Heinz et al. (2001, Neural Computation)](https://doi.org/10.1162/089976601750541804) paper.
 
 ## Contact
 
