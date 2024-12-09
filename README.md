@@ -1,6 +1,6 @@
 ## freqdiscriminet
 
-Code to accompany ["Models optimized for real-world tasks reveal the task-dependent necessity of precise temporal coding in hearing"](https://doi.org/10.1101/2024.04.21.590435) by Mark R. Saddler and Josh H. McDermott (2024). This repository contains the code, models, and analyses for our comparisons between deep neural network and ideal observer models for pure tone frequency discrimination. All other experiments and models are available in the primary repository for this paper: [phaselocknet](https://github.com/msaddler/phaselocknet).
+Code to accompany ["Models optimized for real-world tasks reveal the task-dependent necessity of precise temporal coding in hearing"](https://doi.org/10.1038/s41467-024-54700-5) by Mark R. Saddler and Josh H. McDermott (2024, Nature Communications). This repository contains the code, models, and analyses for our comparisons between deep neural network and ideal observer models for pure tone frequency discrimination. All other experiments and models are available in the primary repository for this paper: [phaselocknet](https://github.com/msaddler/phaselocknet).
 
 ## Dependencies
 
@@ -27,4 +27,4 @@ To directly compare our deep neural network models with ideal observer models, w
 
 ## Contact
 
-Mark R. Saddler (msaddler@mit.edu)
+Mark R. Saddler (msaddler@mit.edu / marksa@dtu.dk)
